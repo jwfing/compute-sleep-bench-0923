@@ -1,0 +1,1 @@
+Use web_search exactly once to find Railway official serverless idle detection documentation. Do not call web_extract. Return the official source URL and one sentence summarizing it. If search fails, report failure without retrying.

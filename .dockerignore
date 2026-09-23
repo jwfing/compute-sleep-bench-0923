@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!bench/
+!bench/*.py
+!prompts/
+!prompts/*.md
