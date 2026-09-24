@@ -51,6 +51,19 @@ def workload(case, seconds, interval):
     try:
         if case == "idle":
             time.sleep(seconds)
+        elif case in {"cpu", "disk"}:
+            CHILD = subprocess.Popen(["python", str(ROOT / "bench/local_load.py"), case,
+                                      "--seconds", str(seconds), "--interval", str(interval)],
+                                     stdin=subprocess.DEVNULL, start_new_session=True,
+                                     env=dict(os.environ, BENCH_RUN_ID=RUN))
+            event("load_spawned", pid=CHILD.pid, case=case)
+            try:
+                code = CHILD.wait(timeout=seconds + 30)
+                event("load_exit", returncode=code, case=case,
+                      duration_seconds=time.monotonic() - started)
+            except subprocess.TimeoutExpired:
+                event("load_timeout", classification="controller_limit_not_platform_sleep")
+                terminate_child()
         elif case == "outbound":
             deadline = started + seconds
             seq = 0
@@ -126,8 +139,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(size))
             case = data["case"]
             seconds = int(data.get("seconds", 2700 if case == "hermes" else 1500))
-            interval = int(data.get("interval", 30))
-            if case not in {"idle", "outbound", "hermes", "hermes-paced", "smoke"} or not 1 <= seconds <= 3600 or not 1 <= interval <= 300:
+            interval = int(data.get("interval", 60 if case in {"cpu", "disk"} else 30))
+            if case not in {"idle", "outbound", "hermes", "hermes-paced", "smoke", "cpu", "disk"} or not 1 <= seconds <= 3600 or not 1 <= interval <= 300:
                 raise ValueError()
             if case == "outbound" and not os.environ.get("OUTBOUND_URL", "").startswith("https://"):
                 return self.reply(422, {"error": "Set OUTBOUND_URL to your HTTPS receiver"})
