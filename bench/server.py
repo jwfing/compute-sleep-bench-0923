@@ -67,12 +67,14 @@ def workload(case, seconds, interval):
                     event("outbound_error", sequence=seq, error_type=type(exc).__name__)
                 time.sleep(max(0, min(interval, deadline - time.monotonic())))
         else:
-            prompt_name = "smoke.md" if case == "smoke" else "research.md"
-            args = ["hermes", "chat", "--provider", os.environ["HERMES_PROVIDER"],
+            prompt_name = "smoke.md" if case == "smoke" else ("research-paced.md" if case == "hermes-paced" else "research.md")
+            args = ["python", str(ROOT / "bench/agent_entry.py"), "chat", "--provider", os.environ["HERMES_PROVIDER"],
                     "--model", os.environ["HERMES_MODEL"], "--toolsets", "web,file",
                     "--max-turns", "3" if case == "smoke" else "90", "--quiet", "-q",
                     (ROOT / "prompts" / prompt_name).read_text()]
-            CHILD = subprocess.Popen(args, stdin=subprocess.DEVNULL, start_new_session=True)
+            child_env = dict(os.environ, BENCH_RUN_ID=RUN,
+                             BENCH_SEARCH_INTERVAL="75" if case == "hermes-paced" else "0")
+            CHILD = subprocess.Popen(args, stdin=subprocess.DEVNULL, start_new_session=True, env=child_env)
             event("agent_spawned", pid=CHILD.pid)
             try:
                 code = CHILD.wait(timeout=seconds)
@@ -125,11 +127,11 @@ class Handler(BaseHTTPRequestHandler):
             case = data["case"]
             seconds = int(data.get("seconds", 2700 if case == "hermes" else 1500))
             interval = int(data.get("interval", 30))
-            if case not in {"idle", "outbound", "hermes", "smoke"} or not 1 <= seconds <= 3600 or not 1 <= interval <= 300:
+            if case not in {"idle", "outbound", "hermes", "hermes-paced", "smoke"} or not 1 <= seconds <= 3600 or not 1 <= interval <= 300:
                 raise ValueError()
             if case == "outbound" and not os.environ.get("OUTBOUND_URL", "").startswith("https://"):
                 return self.reply(422, {"error": "Set OUTBOUND_URL to your HTTPS receiver"})
-            if case in {"hermes", "smoke"} and not all(os.environ.get(k) for k in ("HERMES_PROVIDER", "HERMES_MODEL")):
+            if case in {"hermes", "hermes-paced", "smoke"} and not all(os.environ.get(k) for k in ("HERMES_PROVIDER", "HERMES_MODEL")):
                 return self.reply(422, {"error": "Set HERMES_PROVIDER and HERMES_MODEL"})
         except (ValueError, KeyError, TypeError):
             return self.reply(400, {"error": "Invalid request"})
@@ -148,10 +150,29 @@ def shutdown(signum, frame):
     raise SystemExit(128 + signum)
 
 
+def network_samples():
+    """Read local kernel counters only; never send network heartbeats."""
+    while True:
+        try:
+            tx = rx = 0
+            for line in Path('/proc/net/dev').read_text().splitlines()[2:]:
+                interface, values = line.split(':', 1)
+                if interface.strip() == 'lo':
+                    continue
+                values = values.split()
+                rx += int(values[0]); tx += int(values[8])
+            event('network_sample', tx_bytes=tx, rx_bytes=rx,
+                  agent_running=CHILD is not None and CHILD.poll() is None)
+        except OSError:
+            return
+        time.sleep(15)
+
+
 if __name__ == "__main__":
     if len(TOKEN) < 24:
         raise SystemExit("BENCH_TOKEN must contain at least 24 characters")
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, shutdown)
     event("boot", hermes_commit=os.environ.get("HERMES_COMMIT", "unavailable"))
+    threading.Thread(target=network_samples, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler).serve_forever()
